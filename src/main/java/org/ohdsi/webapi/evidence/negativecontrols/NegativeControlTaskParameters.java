@@ -1,4 +1,4 @@
-package org.ohdsi.webapi.evidence;
+package org.ohdsi.webapi.evidence.negativecontrols;
 
 import java.util.List;
 
@@ -6,28 +6,32 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.ohdsi.webapi.source.Source;
 import org.springframework.jdbc.core.JdbcTemplate;
 
-public class NegativeControl {
-        private String jobName;
+public class NegativeControlTaskParameters {
+	private String jobName;
 
 	private Source source;
-        
-        private int conceptSetId;
-        
-        private String conceptSetName;
+
+	private int conceptSetId;
+
+	private String conceptSetName;
 
 	private String sourceKey;
 
-        private String[] conceptIds;
-        
-        private String conceptDomainId;
-        
-        private String targetDomainId;
-        
-        private JdbcTemplate jdbcTemplate;
-        
-        private String sourceDialect;
-        
-        private String ohdsiSchema;
+	private String[] conceptsOfInterest;
+
+	private String conceptsToInclude = "0";
+
+	private String conceptsToExclude = "0";
+
+	private String conceptDomainId;
+
+	private String outcomeOfInterest;
+
+	private JdbcTemplate jdbcTemplate;
+
+	private String sourceDialect;
+
+	private String ohdsiSchema;
         
 	public String getSourceKey() {
 		return sourceKey;
@@ -60,17 +64,17 @@ public class NegativeControl {
 	}
 
         /**
-	 * @return the conceptIds
+	 * @return the conceptsOfInterest
 	 */
-	public String[] getConceptIds() {
-		return conceptIds;
+	public String[] getConceptsOfInterest() {
+		return conceptsOfInterest;
 	}
 
 	/**
-	 * @param conceptIds the conceptIds to set
+	 * @param conceptsOfInterest the conceptsOfInterest to set
 	 */
-	public void setConceptIds(String[] conceptIds) {
-		this.conceptIds = conceptIds;
+	public void setConceptsOfInterest(String[] conceptsOfInterest) {
+		this.conceptsOfInterest = conceptsOfInterest;
 	}
         
 	@Override
@@ -120,10 +124,10 @@ public class NegativeControl {
     }
 
     /**
-     * @return the targetDomainId
+     * @return the outcomeOfInterest
      */
-    public String getTargetDomainId() {
-        return targetDomainId;
+    public String getOutcomeOfInterest() {
+        return outcomeOfInterest;
     }
 
     /**
@@ -134,10 +138,10 @@ public class NegativeControl {
     }
 
     /**
-     * @param targetDomainId the targetDomainId to set
+     * @param outcomeOfInterest the outcomeOfInterest to set
      */
-    public void setTargetDomainId(String targetDomainId) {
-        this.targetDomainId = targetDomainId;
+    public void setOutcomeOfInterest(String outcomeOfInterest) {
+        this.outcomeOfInterest = outcomeOfInterest;
     }
 
     /**
@@ -181,4 +185,32 @@ public class NegativeControl {
     public void setOhdsiSchema(String ohdsiSchema) {
         this.ohdsiSchema = ohdsiSchema;
     }
+
+	/**
+	 * @return the conceptsToInclude
+	 */
+	public String getConceptsToInclude() {
+		return conceptsToInclude;
+	}
+
+	/**
+	 * @param conceptsToInclude the conceptsToInclude to set
+	 */
+	public void setConceptsToInclude(String conceptsToInclude) {
+		this.conceptsToInclude = conceptsToInclude;
+	}
+
+	/**
+	 * @return the conceptsToExclude
+	 */
+	public String getConceptsToExclude() {
+		return conceptsToExclude;
+	}
+
+	/**
+	 * @param conceptsToExclude the conceptsToExclude to set
+	 */
+	public void setConceptsToExclude(String conceptsToExclude) {
+		this.conceptsToExclude = conceptsToExclude;
+	}
 }

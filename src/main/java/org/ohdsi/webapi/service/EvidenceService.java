@@ -1,5 +1,6 @@
 package org.ohdsi.webapi.service;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import static org.ohdsi.webapi.util.SecurityUtils.whitelist;
 
 import java.util.Arrays;
@@ -22,7 +23,10 @@ import javax.ws.rs.PathParam;
 import javax.ws.rs.Produces;
 import javax.ws.rs.QueryParam;
 import javax.ws.rs.core.MediaType;
+import net.minidev.json.JSONStyle;
+import net.minidev.json.JSONValue;
 import org.apache.commons.httpclient.util.URIUtil;
+import org.apache.commons.lang.ArrayUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.math.NumberUtils;
 import org.codehaus.jettison.json.JSONArray;
@@ -53,10 +57,10 @@ import org.ohdsi.webapi.evidence.Evidence;
 import org.ohdsi.webapi.evidence.LinkoutData;
 import org.ohdsi.webapi.evidence.SpontaneousReport;
 import org.ohdsi.webapi.evidence.EvidenceSearch;
-import org.ohdsi.webapi.evidence.NegativeControl;
-import org.ohdsi.webapi.evidence.NegativeControlRecord;
-import org.ohdsi.webapi.evidence.NegativeControlRepository;
-import org.ohdsi.webapi.evidence.NegativeControlTasklet;
+import org.ohdsi.webapi.evidence.negativecontrols.NegativeControlTaskParameters;
+import org.ohdsi.webapi.evidence.negativecontrols.NegativeControlRecord;
+import org.ohdsi.webapi.evidence.negativecontrols.NegativeControlRepository;
+import org.ohdsi.webapi.evidence.negativecontrols.NegativeControlTasklet;
 import org.ohdsi.webapi.job.JobExecutionResource;
 import org.ohdsi.webapi.job.JobTemplate;
 import org.ohdsi.webapi.source.Source;
@@ -136,30 +140,25 @@ public class EvidenceService extends AbstractDaoService {
   @Path("{sourceKey}/info")
   @Produces(MediaType.APPLICATION_JSON)
   public Collection<EvidenceInfo> getInfo(@PathParam("sourceKey") String sourceKey) {
-
     Source source = getSourceRepository().findBySourceKey(sourceKey);
     String sqlPath = "/resources/evidence/sql/getInfo.sql";
-    String tqName = "OHDSI_schema";
+    String tqName = "evidenceSchema";
     String tqValue = source.getTableQualifier(SourceDaimon.DaimonType.Evidence);
     PreparedStatementRenderer psr = new PreparedStatementRenderer(source, sqlPath, tqName, tqValue);
-    //try {
     return getSourceJdbcTemplate(source).query(psr.getSql(), psr.getSetter(), (rs, rowNum) -> {
 
       EvidenceInfo info = new EvidenceInfo();
       info.title = rs.getString("TITLE");
       info.description = rs.getString("DESCRIPTION");
-      info.contributer = rs.getString("CONTRIBUTER");
-      info.creator = rs.getString("CREATOR");
+			info.provenance = rs.getString("PROVENANCE");
+      info.contributor = rs.getString("CONTRIBUTOR");
+      info.contactName = rs.getString("CONTACT_NAME");
       info.creationDate = rs.getDate("CREATION_DATE");
-      info.rights =  rs.getString("RIGHTS");
-      info.source = rs.getString("SOURCE");
+			info.coverageStartDate = rs.getDate("COVERAGE_START_DATE");
+			info.coverageEndDate = rs.getDate("COVERAGE_END_DATE");
+			info.versionIdentifier = rs.getString("VERSION_IDENTIFIER");
       return info;
     });
-
-    //} catch (EmptyResultDataAccessException e) {
-    //    log.debug(String.format("Request for conceptId=%s resulted in 0 results", id));
-    //    throw new WebApplicationException(Response.Status.RESET_CONTENT); // http 205
-    //}
   }
 
   /**
@@ -171,61 +170,29 @@ public class EvidenceService extends AbstractDaoService {
   @Produces(MediaType.APPLICATION_JSON)
   public Collection<DrugEvidence> getDrugEvidence(@PathParam("sourceKey") String sourceKey, @PathParam("id") final Long id) {
     Source source = getSourceRepository().findBySourceKey(sourceKey);
-    String tqValue = source.getTableQualifier(SourceDaimon.DaimonType.Evidence);
-    String sql_statement = ResourceHelper.GetResourceAsString("/resources/evidence/sql/getDrugEvidence.sql");
-
-    sql_statement = SqlRender.renderSql(sql_statement, new String[]{"id", "OHDSI_schema"},
-      new String[]{String.valueOf(id), tqValue});
-    sql_statement = SqlTranslate.translateSql(sql_statement, source.getSourceDialect());
-
-    final List<DrugEvidence> drugEvidences = new ArrayList<>();
-    List<Map<String, Object>> rows = getSourceJdbcTemplate(source).queryForList(sql_statement);
-    String tempDrugHoi = "";
-    String tempEvidenceType = "";
-    Character tempSupports = 'f';
-    for (Map rs : rows) {
-
-      String evi_type = (String) rs.get("EV_TYPE");
-
-      Character supports;
-      if (rs.get("EV_SUPPORTS") == null) {
-        supports = 'u';
-      } else if (Objects.equals(rs.get("EV_SUPPORTS"), "t")) {
-        supports = 't';
-      } else {
-        supports = 'f';
-      }
+		PreparedStatementRenderer psr = prepareGetEvidenceForConcept(source, id);
+    return getSourceJdbcTemplate(source).query(psr.getSql(), psr.getSetter(), (rs, rowNum) -> {
+      String evidenceSource = rs.getString("SOURCE_ID");
+      String hoi = rs.getString("CONCEPT_ID_2");
+      String hoiName = rs.getString("CONCEPT_ID_2_NAME");
+      String statType = rs.getString("STATISTIC_VALUE_TYPE");
+      BigDecimal statVal = rs.getBigDecimal("STATISTIC_VALUE");
+			String relationshipType = rs.getString("RELATIONSHIP_ID");
+      String uniqueIdentifier = rs.getString("UNIQUE_IDENTIFIER");
+			String uniqueIdentifierType = rs.getString("UNIQUE_IDENTIFIER_TYPE");
       
-      String linkout = (String) rs.get("EV_LINKOUT");
-      String hoi = String.valueOf((Integer) rs.get("EV_HOI"));
-      String hoiName = (String) rs.get("EV_SNOMED_HOI");
-      String statType = (String) rs.get("EV_STAT_TYPE");
-      BigDecimal statVal = (BigDecimal) rs.get("EV_STAT_VAL");
-      String drugHoi = (String)rs.get("EV_DRUGHOI");
-      
-      if((!drugHoi.equalsIgnoreCase(tempDrugHoi))||(!evi_type.equalsIgnoreCase(tempEvidenceType))||(!(Character.toLowerCase(supports) == (Character.toLowerCase(tempSupports)))))
-      {
       DrugEvidence evidence = new DrugEvidence();
-      tempDrugHoi = drugHoi;
-      tempEvidenceType = evi_type;
-      tempSupports = supports;
-      //evidence.drughoi = drugHoi;
-      evidence.evidence = evi_type;
-      evidence.supports = supports;
-      evidence.linkout = linkout;
-      evidence.hoi = hoi;
-      evidence.hoiName = hoiName;
+      evidence.evidenceSource = evidenceSource;
+      evidence.hoiConceptId = hoi;
+      evidence.hoiConceptName = hoiName;
+      evidence.relationshipType = relationshipType;
       evidence.statisticType = statType;
-      if (statType.equals("COUNT")) {
-        evidence.count = statVal.intValue();
-      } else {
-        evidence.value = statVal;
-      }
-      
-      drugEvidences.add(evidence);
-      }
-    }
-    return drugEvidences;
+			evidence.statisticValue = statVal;
+			evidence.uniqueIdentifier = uniqueIdentifier;
+			evidence.uniqueIdentifierType = uniqueIdentifierType;
+
+      return evidence;
+		});
   }
 
   /**
@@ -236,58 +203,30 @@ public class EvidenceService extends AbstractDaoService {
   @Path("{sourceKey}/hoi/{id}")
   @Produces(MediaType.APPLICATION_JSON)
   public Collection<HoiEvidence> getHoiEvidence(@PathParam("sourceKey") String sourceKey, @PathParam("id") final Long id) {
-    
     Source source = getSourceRepository().findBySourceKey(sourceKey);
-    String tableQualifier = source.getTableQualifier(SourceDaimon.DaimonType.Evidence);
-    
-    String sql_statement = ResourceHelper.GetResourceAsString("/resources/evidence/sql/getHoiEvidence.sql");
-    sql_statement = SqlRender.renderSql(sql_statement, new String[]{"id", "OHDSI_schema"},
-            new String[]{String.valueOf(id), tableQualifier});
-    sql_statement = SqlTranslate.translateSql(sql_statement, source.getSourceDialect());
-
-    final List<HoiEvidence> hoiEvidences = new ArrayList<HoiEvidence>();
-
-    //try {
-    List<Map<String, Object>> rows = getSourceJdbcTemplate(source).queryForList(sql_statement);
-        //} catch (EmptyResultDataAccessException e) {
-    //    log.debug(String.format("Request for conceptId=%s resulted in 0 results", id));
-    //    throw new WebApplicationException(Response.Status.RESET_CONTENT); // http 205
-    //}
-
-    for (Map rs : rows) {
-      String evi_type = (String) rs.get("EV_TYPE");
-
-      Character supports = null;
-      if (rs.get("EV_SUPPORTS") == null) {
-        supports = 'u';
-      } else if (Objects.equals(rs.get("EV_SUPPORTS"), "t")) {
-        supports = 't';
-      } else {
-        supports = 'f';
-      }
-
-      String linkout = (String) rs.get("EV_LINKOUT");
-      String drug = String.valueOf(rs.get("EV_DRUG"));
-      String drugName = (String) rs.get("EV_RXNORM_DRUG");
-      String statType = (String) rs.get("EV_STAT_TYPE");
-      BigDecimal statVal = (BigDecimal) rs.get("EV_STAT_VAL");
-
+		PreparedStatementRenderer psr = prepareGetEvidenceForConcept(source, id);
+    return getSourceJdbcTemplate(source).query(psr.getSql(), psr.getSetter(), (rs, rowNum) -> {
+      String evidenceSource = rs.getString("SOURCE_ID");
+      String drug = rs.getString("CONCEPT_ID_1");
+      String drugName = rs.getString("CONCEPT_ID_1_NAME");
+      String statType = rs.getString("STATISTIC_VALUE_TYPE");
+      BigDecimal statVal = rs.getBigDecimal("STATISTIC_VALUE");
+			String relationshipType = rs.getString("RELATIONSHIP_ID");
+      String uniqueIdentifier = rs.getString("UNIQUE_IDENTIFIER");
+			String uniqueIdentifierType = rs.getString("UNIQUE_IDENTIFIER_TYPE");
+      
       HoiEvidence evidence = new HoiEvidence();
-      evidence.evidence = evi_type;
-      evidence.supports = supports;
-      evidence.linkout = linkout;
-      evidence.drug = drug;
-      evidence.drugName = drugName;
+      evidence.evidenceSource = evidenceSource;
+      evidence.drugConceptId = drug;
+      evidence.drugConceptName = drugName;
+      evidence.relationshipType = relationshipType;
       evidence.statisticType = statType;
-      if (statType.equals("COUNT")) {
-        evidence.count = statVal.intValue();
-      } else {
-        evidence.value = statVal;
-      }
+			evidence.statisticValue = statVal;
+			evidence.uniqueIdentifier = uniqueIdentifier;
+			evidence.uniqueIdentifierType = uniqueIdentifierType;
 
-      hoiEvidences.add(evidence);
-    }
-    return hoiEvidences;
+      return evidence;
+		});
   }
 
   /**
@@ -302,46 +241,31 @@ public class EvidenceService extends AbstractDaoService {
     Source source = getSourceRepository().findBySourceKey(sourceKey);
     PreparedStatementRenderer psr = prepareGetDrugHoiEvidence(key, source);
     return getSourceJdbcTemplate(source).query(psr.getSql(), psr.getSetter(), (rs, rowNum) -> {
-      String evi_type = rs.getString("EV_TYPE");
-      Character supports;
-      if (rs.getObject("EV_SUPPORTS") == null) {
-        supports = 'u';
-      } else if (Objects.equals(rs.getObject("EV_SUPPORTS"), "t")) {
-        supports = 't';
-      } else {
-        supports = 'f';
-      }
-
-      String linkout = rs.getString("EV_LINKOUT");
-      String statType = rs.getString("EV_STAT_TYPE");
-      BigDecimal statVal = rs.getBigDecimal("EV_STAT_VAL");
-
+      String evidenceSource = rs.getString("SOURCE_ID");
+      String drug = rs.getString("CONCEPT_ID_1");
+      String drugName = rs.getString("CONCEPT_ID_1_NAME");
+      String hoi = rs.getString("CONCEPT_ID_2");
+      String hoiName = rs.getString("CONCEPT_ID_2_NAME");
+      String statType = rs.getString("STATISTIC_VALUE_TYPE");
+      BigDecimal statVal = rs.getBigDecimal("STATISTIC_VALUE");
+			String relationshipType = rs.getString("RELATIONSHIP_ID");
+      String uniqueIdentifier = rs.getString("UNIQUE_IDENTIFIER");
+			String uniqueIdentifierType = rs.getString("UNIQUE_IDENTIFIER_TYPE");
+			
       DrugHoiEvidence evidence = new DrugHoiEvidence();
-      evidence.evidence = evi_type;
-      evidence.supports = supports;
-      evidence.linkout = linkout;
+      evidence.evidenceSource = evidenceSource;
+      evidence.drugConceptId = drug;
+      evidence.drugConceptName = drugName;
+      evidence.hoiConceptId = hoi;
+      evidence.hoiConceptName = hoiName;
+      evidence.relationshipType = relationshipType;
       evidence.statisticType = statType;
-      if (statType.equals("COUNT")) {
-        evidence.count = statVal.intValue();
-      } else {
-        evidence.value = statVal;
-      }
+			evidence.statisticValue = statVal;
+			evidence.uniqueIdentifier = uniqueIdentifier;
+			evidence.uniqueIdentifierType = uniqueIdentifierType;
 
       return evidence;
     });
-  }
-
-  protected PreparedStatementRenderer prepareGetDrugHoiEvidence(final String key, Source source) {
-
-    String[] par = key.split("-");
-    String drug_id = par[0];
-    String hoi_id = par[1];
-    String sqlPath = "/resources/evidence/sql/getDrugHoiEvidence.sql";
-    String tqName = "OHDSI_schema";
-    String tqValue = source.getTableQualifier(SourceDaimon.DaimonType.Evidence);
-    String[] names = new String[]{"drug_id", "hoi_id"};
-    Object[] values = new Integer[]{Integer.parseInt(drug_id), Integer.parseInt(hoi_id)};
-    return new PreparedStatementRenderer(source, sqlPath, tqName, tqValue, names, values);
   }
 
   /**
@@ -412,33 +336,34 @@ public class EvidenceService extends AbstractDaoService {
   @Path("{sourceKey}/{id}")
   @Produces(MediaType.APPLICATION_JSON)
   public Collection<Evidence> getEvidence(@PathParam("sourceKey") String sourceKey, @PathParam("id") final Long id) {
-    
     Source source = getSourceRepository().findBySourceKey(sourceKey);
-    String sqlPath = "/resources/evidence/sql/getEvidence.sql";
-    String tqValue = source.getTableQualifier(SourceDaimon.DaimonType.Evidence);
-    PreparedStatementRenderer psr = new PreparedStatementRenderer(source, sqlPath, "tableQualifier", tqValue, "id", whitelist(id));
+		PreparedStatementRenderer psr = prepareGetEvidenceForConcept(source, id);
     return getSourceJdbcTemplate(source).query(psr.getSql(), psr.getSetter(), (rs, rowNum) -> {
-      Evidence e = new Evidence();
-      e.conditionId = rs.getInt("CONDITION_ID");
-      e.drugId = rs.getInt("DRUG_ID");
-      e.drugName = rs.getString("DRUG_NAME");
-      e.conditionName = rs.getString("CONDITION_NAME");
-      e.evidenceType = rs.getString("EVIDENCE_TYPE");
+      String evidenceSource = rs.getString("SOURCE_ID");
+      String drug = rs.getString("CONCEPT_ID_1");
+      String drugName = rs.getString("CONCEPT_ID_1_NAME");
+      String hoi = rs.getString("CONCEPT_ID_2");
+      String hoiName = rs.getString("CONCEPT_ID_2_NAME");
+      String statType = rs.getString("STATISTIC_VALUE_TYPE");
+      BigDecimal statVal = rs.getBigDecimal("STATISTIC_VALUE");
+			String relationshipType = rs.getString("RELATIONSHIP_ID");
+      String uniqueIdentifier = rs.getString("UNIQUE_IDENTIFIER");
+			String uniqueIdentifierType = rs.getString("UNIQUE_IDENTIFIER_TYPE");
+      
+      Evidence evidence = new Evidence();
+      evidence.evidenceSource = evidenceSource;
+			evidence.drugConceptId = drug;
+			evidence.drugConceptName = drugName;
+      evidence.hoiConceptId = hoi;
+      evidence.hoiConceptName = hoiName;
+      evidence.relationshipType = relationshipType;
+      evidence.statisticType = statType;
+			evidence.statisticValue = statVal;
+			evidence.uniqueIdentifier = uniqueIdentifier;
+			evidence.uniqueIdentifierType = uniqueIdentifierType;
 
-      if (rs.getString("SUPPORTS") == null) {
-        e.supports = 'u';
-      } else if ((rs.getString("SUPPORTS")).equalsIgnoreCase("t")) {
-        e.supports = 't';
-      } else {
-        e.supports = 'f';
-      }
-
-      e.statisticType = rs.getString("STATISTIC_TYPE");
-      e.linkout = rs.getString("EVIDENCE_LINKOUT");
-      e.value = rs.getBigDecimal("STATISTIC_VALUE");
-
-      return e;
-    });
+      return evidence;
+		});
   }
 
   
@@ -461,30 +386,13 @@ public class EvidenceService extends AbstractDaoService {
       e.evidence_group_name = evidenceGroup;
       //e.evidence_id = BigInteger.valueOf((long)rs.get("id"));
       e.evidence_type = rs.getString("evidence_type");
-      //e.supports = (Character)rs.get("supports");
+      //e.relationshipType = (Character)rs.get("relationshipType");
       e.evidence_count = rs.getDouble("statistic_value");
       return e;
     });
 
   }
 
-  protected PreparedStatementRenderer prepareGetEvidenceSummaryBySource(
-      String conditionID, String drugID, String evidenceGroup,
-      Source source) {
-
-    String sqlPath = "/resources/evidence/sql/getEvidenceSummaryBySource.sql";
-    String tqName = "tableQualifier";
-    String tqValue = source.getTableQualifier(SourceDaimon.DaimonType.Evidence);
-
-    String evidenceType = null;
-    if (evidenceGroup.equalsIgnoreCase("Literature"))
-      evidenceType = "MEDLINE";
-    String[] names = new String[]{"drugID", "conditionID", "evidenceGroup"};
-    Object[] values = new Object[]{Integer.valueOf(drugID), Integer.valueOf(conditionID), evidenceType};
-    return new PreparedStatementRenderer(source, sqlPath, tqName, tqValue, names, values);
-  }
-  
-  
   /**
    * @param conditionID
    * @param drugID
@@ -544,19 +452,6 @@ public class EvidenceService extends AbstractDaoService {
     return result;
   }
 
-  protected PreparedStatementRenderer prepareGetEvidenceDetails(
-      Integer conditionID, Integer drugID, String evidenceType,
-      Source source) {
-
-    String sqlPath = "/resources/evidence/sql/getEvidenceDetails.sql";
-    String tqName = "tableQualifier";
-    String tqValue = source.getTableQualifier(SourceDaimon.DaimonType.Evidence);
-    String[] names = new String[]{"drugID", "conditionID", "evidenceType"};
-    Object[] values = new Object[]{drugID, conditionID, evidenceType};
-    PreparedStatementRenderer psr = new PreparedStatementRenderer(source, sqlPath, tqName, tqValue, names, values);
-    return psr;
-  }
-
   @POST
   @Path("{sourceKey}/spontaneousreports")
   @Produces(MediaType.APPLICATION_JSON)
@@ -577,20 +472,6 @@ public class EvidenceService extends AbstractDaoService {
         e.prr = rs.getBigDecimal("AERS_PRR_ORIGINAL");
         return e;
     });
-  }
-
-  protected PreparedStatementRenderer prepareGetSpontaneousReports(
-      EvidenceSearch search, Source source) {
-
-    String sqlPath = "/resources/evidence/sql/getSpontaneousReports.sql";
-    String tqName = "tableQualifier";
-    String tqValue = source.getTableQualifier(SourceDaimon.DaimonType.Evidence);
-    String[] names = new String[]{"conditionConceptList", "ingredientConceptList"};
-    List<Integer> conditionConceptArray =  Arrays.stream(search.conditionConceptList).map(NumberUtils::toInt).collect(Collectors.toList());
-    List<Integer> ingredientConceptArray =  Arrays.stream(search.ingredientConceptList).map(NumberUtils::toInt).collect(Collectors.toList());
-    Object[] variableValues = new Object[]{conditionConceptArray.<Integer>toArray(), ingredientConceptArray.<Integer>toArray()};
-
-    return new PreparedStatementRenderer(source, sqlPath, tqName, tqValue, names, variableValues);
   }
 
   @POST
@@ -624,19 +505,6 @@ public class EvidenceService extends AbstractDaoService {
         return e;
       });
   }
-
-  protected PreparedStatementRenderer prepareEvidenceSearch(EvidenceSearch search, Source source) {
-
-    String resourcePath = "/resources/evidence/sql/getEvidenceFromUniverse.sql";
-    String[] searchRegexes = new String[]{"tableQualifier"};
-    String[] replacementStrings = new String[]{source.getTableQualifier(SourceDaimon.DaimonType.Evidence)};
-    String[] names = new String[]{"conditionConceptList", "ingredientConceptList", "evidenceTypeList"};
-    List<Integer> conditionConceptArray =  Arrays.stream(search.conditionConceptList).map(NumberUtils::toInt).collect(Collectors.toList());
-    List<Integer> ingredientConceptArray =  Arrays.stream(search.ingredientConceptList).map(NumberUtils::toInt).collect(Collectors.toList());
-    Object[] values = new Object[]{conditionConceptArray.<Integer>toArray(), ingredientConceptArray.<Integer>toArray(), search.evidenceTypeList};
-
-    return new PreparedStatementRenderer(source, resourcePath, searchRegexes, replacementStrings, names, values);
-  }
   
   @POST
   @Path("{sourceKey}/labelevidence")
@@ -655,18 +523,29 @@ public class EvidenceService extends AbstractDaoService {
     });
   }
 
-  protected PreparedStatementRenderer prepareLabelEvidence(EvidenceSearch search, Source source) {
-
-    String resourcePath = "/resources/evidence/sql/getLabelEvidence.sql";
-    String[] searchStrings = new String[]{"tableQualifier"};
-    String[] replacementStrings = new String[]{source.getTableQualifier(SourceDaimon.DaimonType.Evidence)};
-    String[] variableNames = new String[]{"conditionConceptList", "ingredientConceptList", "evidenceTypeList"};
-    List<Integer> conditionConceptArray =  Arrays.stream(search.conditionConceptList).map(NumberUtils::toInt).collect(Collectors.toList());
-    List<Integer> ingredientConceptArray =  Arrays.stream(search.ingredientConceptList).map(NumberUtils::toInt).collect(Collectors.toList());
-    Object[] variableValues = new Object[]{conditionConceptArray.<Integer>toArray(), ingredientConceptArray.<Integer>toArray(), search.evidenceTypeList};
-
-    return new PreparedStatementRenderer(source, resourcePath, searchStrings, replacementStrings, variableNames, variableValues);
-  }
+  @GET
+  @Path("{sourceKey}/negativecontrols-sql")
+  @Produces(MediaType.TEXT_PLAIN)
+  @Consumes(MediaType.APPLICATION_JSON)
+	public String getNegativeControlSql(@PathParam("sourceKey") String sourceKey) throws Exception {
+		Long jobId = new Long(1);
+		// Refactor to take this as a paramter
+	  Source dbsource = getSourceRepository().findBySourceKey(sourceKey);
+		
+		// Create the task
+		NegativeControlTaskParameters task = new NegativeControlTaskParameters();
+		String outcomeOfInterest = "drug";
+		String[] conceptsOfInterest = {"4344040"};
+		String conceptsToExclude = "0";
+		String conceptsToInclude = "1186087,19015230,1381504,757688,1314865,715233,950933,1563600,980311,1541079,19008009,19010482,1311078,1304643,1338512,1301125,1151789,1352213,1304850,1542948,1597235,19048493,19097463,1536743,751889,19041065,787787,1512480,19117912,40238188,1112921,1351541,1192218,19024227,1305058,909841,708298,1114220,1522957,785788,1378382,19071160,19049105,753626,42903728,19090761,1584910,836208,1236744,40171288";
+		
+		task.setSource(dbsource);
+		task.setOutcomeOfInterest(outcomeOfInterest);
+		task.setConceptsOfInterest(conceptsOfInterest);
+		task.setConceptsToInclude(conceptsToInclude);
+		task.setConceptsToExclude(conceptsToExclude);
+		return getNegativeControlSql(task, jobId);
+	}
 
 /**
  * Queues up a negative control task, that generates and translates SQL for the
@@ -680,7 +559,7 @@ public class EvidenceService extends AbstractDaoService {
   @Path("{sourceKey}/negativecontrols")
   @Produces(MediaType.APPLICATION_JSON)
   @Consumes(MediaType.APPLICATION_JSON)
-  public JobExecutionResource queueNegativeControlsJob(@PathParam("sourceKey") String sourceKey, NegativeControl task) throws Exception {
+  public JobExecutionResource queueNegativeControlsJob(@PathParam("sourceKey") String sourceKey, NegativeControlTaskParameters task) throws Exception {
         if (task == null) {
                 return null;
         }
@@ -706,6 +585,22 @@ public class EvidenceService extends AbstractDaoService {
         builder.addString("concept_set_name", task.getConceptSetName());
         builder.addString("concept_domain_id", task.getConceptDomainId());
         builder.addString("source_id", ("" + source.getSourceId()));
+				
+				// Create a set of parameters to store with the generation info
+				JSONObject params = new JSONObject();
+				// If/when we want to treat these concepts as lists, this
+				// code will do the trick
+				//JSONArray conceptsToInclude = new JSONArray();
+				//JSONArray conceptsToExclude = new JSONArray();
+				//for(int i = 0; i < task.getConceptsToInclude().length; i++) {
+				//	conceptsToInclude.put(task.getConceptsToInclude()[i]);
+				//}
+				//for(int i = 0; i < task.getConceptsToExclude().length; i++) {
+				//	conceptsToExclude.put(task.getConceptsToExclude()[i]);
+				//}
+				params.put("conceptsToInclude", task.getConceptsToInclude());
+				params.put("conceptsToExclude", task.getConceptsToExclude());
+				builder.addString("params", params.toString());
         
         final String taskString = task.toString();
         final JobParameters jobParameters = builder.toJobParameters();
@@ -725,45 +620,243 @@ public class EvidenceService extends AbstractDaoService {
     Source source = getSourceRepository().findBySourceKey(sourceKey);
     return negativeControlRepository.findAllBySourceIdAndConceptId(source.getSourceId(), conceptSetId);
   }
- /**
-  * Obtain the SQL that is used to retrieve the list of negative controls from the database
-  * @param task
-  * @return A sql statement
-  */
-  public static String getNegativeControlSql(NegativeControl task) {
-    String resourceRoot = "/resources/evidence/sql/";
-    String sql = ResourceHelper.GetResourceAsString(resourceRoot + "getNegativeControls.sql");
-    if (task.getSource().getSourceDialect().equals("sql server")) {
-        sql = ResourceHelper.GetResourceAsString(resourceRoot + "getNegativeControlsSqlServer.sql");
-    }
-
-    String tableQualifier = task.getSource().getTableQualifier(SourceDaimon.DaimonType.Evidence);
-    String conceptIds = JoinArray(task.getConceptIds());
-    String[] params = new String[]{"tableQualifier", "CONCEPT_IDS", "CONCEPT_SET_ID", "CONCEPT_SET_NAME", "CONCEPT_DOMAIN_ID", "TARGET_DOMAIN_ID", "SOURCE_ID"};
-    String[] values = new String[]{tableQualifier, conceptIds, String.valueOf(task.getConceptSetId()), task.getConceptSetName(), task.getConceptDomainId().toUpperCase(), task.getTargetDomainId().toUpperCase(), String.valueOf(task.getSource().getSourceId())};
+	
+	public static String getEvidenceJobIdSql(NegativeControlTaskParameters task) {
+    String resourceRoot = "/resources/evidence/sql/negativecontrols/";
+    String sql = ResourceHelper.GetResourceAsString(resourceRoot + "getJobId.sql");
+    String evidenceSchema = task.getSource().getTableQualifier(SourceDaimon.DaimonType.Evidence);
+    String[] params = new String[]{"evidenceSchema"};
+    String[] values = new String[]{evidenceSchema};
     sql = SqlRender.renderSql(sql, params, values);
     sql = SqlTranslate.translateSql(sql, task.getSource().getSourceDialect());
 
     return sql;
-}
+	}
+	
+	public static String getNegativeControlSql(NegativeControlTaskParameters task, Long jobId ) {
+		StringBuilder sb = new StringBuilder();
+    String resourceRoot = "/resources/evidence/sql/negativecontrols/";
+		Source source = task.getSource();
+	  String evidenceSchema = source.getTableQualifier(SourceDaimon.DaimonType.Evidence);
+		String vocabularySchema = evidenceSchema;
+		try {
+			vocabularySchema = source.getTableQualifier(SourceDaimon.DaimonType.Vocabulary);
+		} catch (Exception e) {
+			// Default the vocabulary schema to the evidence schema
+		}
+				
+		String outcomeOfInterest = task.getOutcomeOfInterest().toLowerCase();
+		String conceptsOfInterest = JoinArray(task.getConceptsOfInterest());
+		String conceptsToExclude = task.getConceptsToExclude();
+		String conceptsToInclude = task.getConceptsToInclude();
+		String conceptsToExcludeData = "#NC_EXCLUDED_CONCEPTS";
+		String conceptsToIncludeData = "#NC_INCLUDED_CONCEPTS";
+		String broadConceptsData = evidenceSchema + ".NC_LU_BROAD_CONDITIONS";
+		String drugInducedConditionsData = evidenceSchema + ".NC_LU_DRUG_INDUCED_CONDITIONS";
+		String pregnancyConditionData = evidenceSchema + ".NC_LU_PREGNANCY_CONDITIONS";
+	
+		String[] params = new String[]{"outcomeOfInterest", "conceptsOfInterest", "vocabulary", "evidenceSchema"};
+    String[] values = new String[]{outcomeOfInterest, conceptsOfInterest, vocabularySchema, evidenceSchema};
+		
+		String sql = ResourceHelper.GetResourceAsString(resourceRoot + "findConceptUniverse.sql");
+    sql = SqlRender.renderSql(sql, params, values);
+		sb.append(sql + "\n\n");
+		
+		sql = ResourceHelper.GetResourceAsString(resourceRoot + "splicerConcepts.sql");
+    sql = SqlRender.renderSql(sql, params, values);
+		sb.append(sql + "\n\n");
 
-  public static String getNegativeControlDeleteStatementSql(NegativeControl task){
-    String sql = ResourceHelper.GetResourceAsString("/resources/evidence/sql/deleteNegativeControls.sql");
+		sql = ResourceHelper.GetResourceAsString(resourceRoot + "findDrugIndications.sql");
+    sql = SqlRender.renderSql(sql, params, values);
+		sb.append(sql + "\n\n");
+		
+		sql = ResourceHelper.GetResourceAsString(resourceRoot + "findConcepts.sql");
+    sql = SqlRender.renderSql(sql, params, values);
+		sql = SqlRender.renderSql(sql, 
+			new String[] {"storeData", "concepts"}, 
+			new String[] {conceptsToExcludeData, conceptsToExclude});
+		sb.append(sql + "\n\n");
+		
+	
+		sql = ResourceHelper.GetResourceAsString(resourceRoot + "findConcepts.sql");
+    sql = SqlRender.renderSql(sql, params, values);
+		sql = SqlRender.renderSql(sql, 
+			new String[] {"storeData", "concepts"}, new
+				String[] {conceptsToIncludeData, conceptsToInclude});
+		sb.append(sql + "\n\n");
+		
+		sql = ResourceHelper.GetResourceAsString(resourceRoot + "findFaersADRs.sql");
+    sql = SqlRender.renderSql(sql, params, values);
+		sb.append(sql + "\n\n");
+
+		sql = ResourceHelper.GetResourceAsString(resourceRoot + "pullEvidence.sql");
+    sql = SqlRender.renderSql(sql, params, values);
+		sb.append(sql + "\n\n");
+		
+		sql = ResourceHelper.GetResourceAsString(resourceRoot + "summarizeEvidence.sql");
+    sql = SqlRender.renderSql(sql, params, values);
+		sql = SqlRender.renderSql(sql, 
+			new String[] {"broadConceptsData", "drugInducedConditionsData", "pregnancyConditionData", "conceptsToExclude", "conceptsToInclude"}, 
+			new String[] {broadConceptsData, drugInducedConditionsData, pregnancyConditionData, conceptsToExcludeData, conceptsToIncludeData});
+		sb.append(sql + "\n\n");
+		
+		sql = ResourceHelper.GetResourceAsString(resourceRoot + "optimizeEvidence.sql");
+    sql = SqlRender.renderSql(sql, params, values);
+		sb.append(sql + "\n\n");
+		
+		sql = ResourceHelper.GetResourceAsString(resourceRoot + "deleteJobResults.sql");
+    sql = SqlRender.renderSql(sql, params, values);
+		sql = SqlRender.renderSql(sql, 
+			new String[] {"jobId"}, 
+			new String[] {Long.toString(jobId)});
+		sb.append(sql + "\n\n");
+		
+		sql = ResourceHelper.GetResourceAsString(resourceRoot + "exportNegativeControls.sql");
+    sql = SqlRender.renderSql(sql, params, values);
+		sql = SqlRender.renderSql(sql, 
+			new String[] {"jobId"}, 
+			new String[] {Long.toString(jobId)});
+		sb.append(sql + "\n\n");
+		
+		sql = SqlTranslate.translateSql(sb.toString(), source.getSourceDialect());
+
+		return sql;
+	}
+
+  public static String getNegativeControlDeleteStatementSql(NegativeControlTaskParameters task){
+    String sql = ResourceHelper.GetResourceAsString("/resources/evidence/sql/negativecontrols/deleteNegativeControls.sql");
     sql = SqlRender.renderSql(sql, new String[] { "ohdsiSchema" },  new String[] { task.getOhdsiSchema() });
     sql = SqlTranslate.translateSql(sql, task.getSourceDialect());
 
     return sql;
 }
 
-  public static String getNegativeControlInsertStatementSql(NegativeControl task){
-    String sql = ResourceHelper.GetResourceAsString("/resources/evidence/sql/insertNegativeControls.sql");
+  public static String getNegativeControlInsertStatementSql(NegativeControlTaskParameters task){
+    String sql = ResourceHelper.GetResourceAsString("/resources/evidence/sql/negativecontrols/insertNegativeControls.sql");
     sql = SqlRender.renderSql(sql, new String[] { "ohdsiSchema" },  new String[] { task.getOhdsiSchema() });
     sql = SqlTranslate.translateSql(sql, task.getSourceDialect());
 
     return sql;
 }
+	
+	public static String getNegativeControlsFromEvidenceSource(NegativeControlTaskParameters task, Long jobId) {
+    String resourceRoot = "/resources/evidence/sql/negativecontrols/";
+		String sql = ResourceHelper.GetResourceAsString(resourceRoot + "getNegativeControls.sql");
+		String evidenceSchema = task.getSource().getTableQualifier(SourceDaimon.DaimonType.Evidence);
+    String[] params = new String[]{"CONCEPT_SET_ID", "CONCEPT_SET_NAME", "outcomeOfInterest", "SOURCE_ID", "evidenceSchema", "jobId"};
+    String[] values = new String[]{String.valueOf(task.getConceptSetId()), task.getConceptSetName(), task.getOutcomeOfInterest().toUpperCase(), String.valueOf(task.getSource().getSourceId()), evidenceSchema, Long.toString(jobId)};
+    sql = SqlRender.renderSql(sql, params, values);
 
-  //parse ADRAnnotation linkouts
+    return sql;
+		
+	}
+
+  protected PreparedStatementRenderer prepareGetDrugHoiEvidence(final String key, Source source) {
+
+    String[] par = key.split("-");
+    String drug_id = par[0];
+    String hoi_id = par[1];
+    String sqlPath = "/resources/evidence/sql/getDrugHoiEvidence.sql";
+    String evidenceSchema = source.getTableQualifier(SourceDaimon.DaimonType.Evidence);
+		String vocabularySchema = evidenceSchema;
+		try {
+			vocabularySchema = source.getTableQualifier(SourceDaimon.DaimonType.Vocabulary);
+		} catch (Exception e) {
+			// Ignore - The vocabularySchema will default to the evidence schema
+		}
+    String[] tableQualifierNames = new String[]{"evidenceSchema", "vocabularySchema"};
+    String[] tableQualifierValues = new String[]{evidenceSchema, vocabularySchema};
+    String[] names = new String[]{"drug_id", "hoi_id"};
+    Object[] values = new Integer[]{Integer.parseInt(drug_id), Integer.parseInt(hoi_id)};
+    return new PreparedStatementRenderer(source, sqlPath, tableQualifierNames, tableQualifierValues, names, values);
+  }
+
+	protected PreparedStatementRenderer prepareGetEvidenceForConcept(Source source, Long conceptId) {
+    String sqlPath = "/resources/evidence/sql/getEvidenceForConcept.sql";
+    String evidenceSchema = source.getTableQualifier(SourceDaimon.DaimonType.Evidence);
+		String vocabularySchema = evidenceSchema;
+		try {
+			vocabularySchema = source.getTableQualifier(SourceDaimon.DaimonType.Vocabulary);
+		} catch (Exception e) {
+			// Ignore - The vocabularySchema will default to the evidence schema
+		}
+    String[] tableQualifierNames = new String[]{"evidenceSchema", "vocabularySchema"};
+    String[] tableQualifierValues = new String[]{evidenceSchema, vocabularySchema};
+    String[] names = new String[]{"id"};
+    Object[] values = new Long[]{conceptId};
+    return new PreparedStatementRenderer(source, sqlPath, tableQualifierNames, tableQualifierValues, names, values);
+  }
+	
+  protected PreparedStatementRenderer prepareGetEvidenceSummaryBySource(
+      String conditionID, String drugID, String evidenceGroup,
+      Source source) {
+
+    String sqlPath = "/resources/evidence/sql/getEvidenceSummaryBySource.sql";
+    String tqName = "tableQualifier";
+    String tqValue = source.getTableQualifier(SourceDaimon.DaimonType.Evidence);
+
+    String evidenceType = null;
+    if (evidenceGroup.equalsIgnoreCase("Literature"))
+      evidenceType = "MEDLINE";
+    String[] names = new String[]{"drugID", "conditionID", "evidenceGroup"};
+    Object[] values = new Object[]{Integer.valueOf(drugID), Integer.valueOf(conditionID), evidenceType};
+    return new PreparedStatementRenderer(source, sqlPath, tqName, tqValue, names, values);
+  }
+  
+  protected PreparedStatementRenderer prepareGetEvidenceDetails(
+      Integer conditionID, Integer drugID, String evidenceType,
+      Source source) {
+
+    String sqlPath = "/resources/evidence/sql/getEvidenceDetails.sql";
+    String tqName = "tableQualifier";
+    String tqValue = source.getTableQualifier(SourceDaimon.DaimonType.Evidence);
+    String[] names = new String[]{"drugID", "conditionID", "evidenceType"};
+    Object[] values = new Object[]{drugID, conditionID, evidenceType};
+    PreparedStatementRenderer psr = new PreparedStatementRenderer(source, sqlPath, tqName, tqValue, names, values);
+    return psr;
+  }
+
+	protected PreparedStatementRenderer prepareGetSpontaneousReports(
+      EvidenceSearch search, Source source) {
+
+    String sqlPath = "/resources/evidence/sql/getSpontaneousReports.sql";
+    String tqName = "tableQualifier";
+    String tqValue = source.getTableQualifier(SourceDaimon.DaimonType.Evidence);
+    String[] names = new String[]{"conditionConceptList", "ingredientConceptList"};
+    List<Integer> conditionConceptArray =  Arrays.stream(search.conditionConceptList).map(NumberUtils::toInt).collect(Collectors.toList());
+    List<Integer> ingredientConceptArray =  Arrays.stream(search.ingredientConceptList).map(NumberUtils::toInt).collect(Collectors.toList());
+    Object[] variableValues = new Object[]{conditionConceptArray.<Integer>toArray(), ingredientConceptArray.<Integer>toArray()};
+
+    return new PreparedStatementRenderer(source, sqlPath, tqName, tqValue, names, variableValues);
+  }
+
+  protected PreparedStatementRenderer prepareEvidenceSearch(EvidenceSearch search, Source source) {
+
+    String resourcePath = "/resources/evidence/sql/getEvidenceFromUniverse.sql";
+    String[] searchRegexes = new String[]{"tableQualifier"};
+    String[] replacementStrings = new String[]{source.getTableQualifier(SourceDaimon.DaimonType.Evidence)};
+    String[] names = new String[]{"conditionConceptList", "ingredientConceptList", "evidenceTypeList"};
+    List<Integer> conditionConceptArray =  Arrays.stream(search.conditionConceptList).map(NumberUtils::toInt).collect(Collectors.toList());
+    List<Integer> ingredientConceptArray =  Arrays.stream(search.ingredientConceptList).map(NumberUtils::toInt).collect(Collectors.toList());
+    Object[] values = new Object[]{conditionConceptArray.<Integer>toArray(), ingredientConceptArray.<Integer>toArray(), search.evidenceTypeList};
+
+    return new PreparedStatementRenderer(source, resourcePath, searchRegexes, replacementStrings, names, values);
+  }
+	
+  protected PreparedStatementRenderer prepareLabelEvidence(EvidenceSearch search, Source source) {
+
+    String resourcePath = "/resources/evidence/sql/getLabelEvidence.sql";
+    String[] searchStrings = new String[]{"tableQualifier"};
+    String[] replacementStrings = new String[]{source.getTableQualifier(SourceDaimon.DaimonType.Evidence)};
+    String[] variableNames = new String[]{"conditionConceptList", "ingredientConceptList", "evidenceTypeList"};
+    List<Integer> conditionConceptArray =  Arrays.stream(search.conditionConceptList).map(NumberUtils::toInt).collect(Collectors.toList());
+    List<Integer> ingredientConceptArray =  Arrays.stream(search.ingredientConceptList).map(NumberUtils::toInt).collect(Collectors.toList());
+    Object[] variableValues = new Object[]{conditionConceptArray.<Integer>toArray(), ingredientConceptArray.<Integer>toArray(), search.evidenceTypeList};
+
+    return new PreparedStatementRenderer(source, resourcePath, searchStrings, replacementStrings, variableNames, variableValues);
+  }
+	
+	//parse ADRAnnotation linkouts
   private EvidenceDetails getADRlinkout(JSONArray lineItems,int j) throws JSONException {
 	  EvidenceDetails e = new EvidenceDetails();
 	  JSONObject tempItem = lineItems.getJSONObject(j);
